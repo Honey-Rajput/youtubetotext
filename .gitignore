@@ -1,0 +1,25 @@
+# Ignore environment secrets
+.env
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore audio/temp files
+*.wav
+*.mp3
+*.m4a
+
+# Ignore Streamlit secrets
+.streamlit/secrets.toml
+
+# Ignore virtual environment
+venv/
+env/
+.venv/
+
+# Ignore OS + editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
