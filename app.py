@@ -11,7 +11,7 @@ from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from youtube_transcript_api import YouTubeTranscriptApi
 from dotenv import load_dotenv
-import speech_recognition as sr
+
 
 # ---------------------------------------------------------------------------
 # Configuration
