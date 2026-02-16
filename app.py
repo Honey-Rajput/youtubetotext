@@ -291,7 +291,7 @@ def get_video_info(video_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # Utility — Transcript fetching (multi-method with fallbacks)
 # ---------------------------------------------------------------------------
-def _fetch_via_ytdlp(video_id: str) -> str:
+def _fetch_via_ytdlp(video_id: str, cookies_path: str | None = None) -> str:
     """Method 1: Use yt-dlp to grab subtitles — most reliable, bypasses blocks."""
     import yt_dlp
     import tempfile
@@ -310,6 +310,9 @@ def _fetch_via_ytdlp(video_id: str) -> str:
             'quiet': True,
             'no_warnings': True,
         }
+        if cookies_path:
+            ydl_opts['cookiefile'] = cookies_path
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
@@ -352,12 +355,22 @@ def _fetch_via_ytdlp(video_id: str) -> str:
             return ' '.join(lines)
 
 
-def _fetch_via_transcript_api(video_id: str) -> str:
+def _fetch_via_transcript_api(video_id: str, cookies_path: str | None = None) -> str:
     """Method 2: Use youtube-transcript-api — may be blocked by YouTube."""
     try:
-        ytt = YouTubeTranscriptApi()
-        result = ytt.fetch(video_id)
-        lines = [snippet.text for snippet in result]
+        # Check if cookies_path is provided
+        # youtube-transcript-api uses a file path for cookies in some ways, but standard usage is simpler.
+        # If we have cookies, we can try to use them if the library supports it.
+        # However, standard get_transcript doesn't easily take a cookie file path directly in all versions 
+        # without headers work.
+        # Let's try the standard call first. 
+        # Note: Recent versions might support cookies param.
+        if cookies_path:
+            result = YouTubeTranscriptApi.get_transcript(video_id, cookies=cookies_path)
+        else:
+            result = YouTubeTranscriptApi.get_transcript(video_id)
+            
+        lines = [snippet['text'] for snippet in result]
         if not lines:
             return ""
         return " ".join(lines)
@@ -365,7 +378,7 @@ def _fetch_via_transcript_api(video_id: str) -> str:
         return ""
 
 
-def _fetch_via_whisper(video_id: str) -> str:
+def _fetch_via_whisper(video_id: str, cookies_path: str | None = None) -> str:
     """Method 3: Download audio with yt-dlp and transcribe locally with Whisper."""
     import yt_dlp
     import tempfile
@@ -384,6 +397,9 @@ def _fetch_via_whisper(video_id: str) -> str:
             'quiet': True,
             'no_warnings': True,
         }
+        if cookies_path:
+            ydl_opts['cookiefile'] = cookies_path
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
@@ -416,7 +432,7 @@ def _fetch_via_whisper(video_id: str) -> str:
         return ""
 
 
-def fetch_transcript(video_id: str) -> str:
+def fetch_transcript(video_id: str, cookies_path: str | None = None) -> str:
     """Fetch transcript using multiple methods with automatic fallback.
 
     Order: yt-dlp subtitles → youtube-transcript-api → Whisper local transcription.
@@ -426,7 +442,7 @@ def fetch_transcript(video_id: str) -> str:
     # Method 1: yt-dlp subtitles (most reliable, no API blocks)
     try:
         st.write("📡 Trying subtitle extraction (Method 1)...")
-        text = _fetch_via_ytdlp(video_id)
+        text = _fetch_via_ytdlp(video_id, cookies_path)
         if text and len(text.strip()) > 20:
             st.write("✅ Got transcript via subtitle extraction!")
             return text
@@ -436,7 +452,7 @@ def fetch_transcript(video_id: str) -> str:
     # Method 2: youtube-transcript-api (may be blocked)
     try:
         st.write("📡 Trying transcript API (Method 2)...")
-        text = _fetch_via_transcript_api(video_id)
+        text = _fetch_via_transcript_api(video_id, cookies_path)
         if text and len(text.strip()) > 20:
             st.write("✅ Got transcript via API!")
             return text
@@ -446,7 +462,7 @@ def fetch_transcript(video_id: str) -> str:
     # Method 3: Download audio + Whisper (slowest but always works)
     try:
         st.write("🎙️ Downloading audio for local transcription (Method 3 — this may take a minute)...")
-        text = _fetch_via_whisper(video_id)
+        text = _fetch_via_whisper(video_id, cookies_path)
         if text and len(text.strip()) > 20:
             st.write("✅ Got transcript via local AI transcription!")
             return text
@@ -725,6 +741,21 @@ def main():
             index=1,
             help="Brief: Quick overview • Standard: Balanced • Detailed: Comprehensive notes",
         )
+        
+        # Cookie Input
+        st.markdown("### 🍪 YouTube Cookies")
+        st.markdown(
+            "If you get specific 'Sign in to confirm you’re not a bot' errors, "
+            "paste your Netscape-formatted cookies here."
+        )
+        cookies_content = st.text_area(
+            "Paste cookie content",
+            placeholder="# Netscape HTTP Cookie File\n.youtube.com ...",
+            height=100,
+            label_visibility="collapsed",
+            help="Export your YouTube cookies using a browser extension (like 'Get cookies.txt LOCALLY') and paste them here."
+        )
+
         st.markdown("---")
         st.markdown("### 📖 How to Use")
         st.markdown(
@@ -789,6 +820,20 @@ def main():
             st.error("❌ Invalid YouTube URL. Please paste a valid link (e.g. https://www.youtube.com/watch?v=...).")
             st.stop()
 
+        # Handle Cookies
+        cookies_path = None
+        if cookies_content:
+            try:
+                # Create a temporary file for cookies
+                # We use delete=False so we can close it and let other processes read it
+                # We'll clean it up in a finally block
+                tf = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
+                tf.write(cookies_content)
+                tf.close()
+                cookies_path = tf.name
+            except Exception as e:
+                st.warning(f"⚠️ Could not process cookies: {e}")
+
         # Fetch info + transcript
         with st.status("🔄 Processing video...", expanded=True) as status:
             st.write("📡 Fetching video information...")
@@ -797,7 +842,7 @@ def main():
 
             st.write("📝 Extracting transcript...")
             try:
-                transcript = fetch_transcript(video_id)
+                transcript = fetch_transcript(video_id, cookies_path)
                 if not transcript.strip():
                     st.error("😕 No transcript/captions found for this video. Only videos with captions can be summarized.")
                     st.stop()
