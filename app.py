@@ -289,10 +289,71 @@ def get_video_info(video_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Utility — Transcript fetching
+# Utility — Transcript fetching (multi-method with fallbacks)
 # ---------------------------------------------------------------------------
-def fetch_transcript(video_id: str) -> str:
-    """Fetch transcript for a YouTube video (youtube-transcript-api v1.x)."""
+def _fetch_via_ytdlp(video_id: str) -> str:
+    """Method 1: Use yt-dlp to grab subtitles — most reliable, bypasses blocks."""
+    import yt_dlp
+    import tempfile
+    import glob
+    import json
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        ydl_opts = {
+            'skip_download': True,
+            'writesubtitles': True,
+            'writeautomaticsub': True,
+            'subtitleslangs': ['en', 'hi', 'en-orig', 'a.en'],
+            'subtitlesformat': 'json3',
+            'outtmpl': os.path.join(tmpdir, '%(id)s'),
+            'quiet': True,
+            'no_warnings': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        # Find any downloaded subtitle file
+        sub_files = glob.glob(os.path.join(tmpdir, "*.json3"))
+        if not sub_files:
+            # Also check for vtt files
+            sub_files = glob.glob(os.path.join(tmpdir, "*.vtt"))
+
+        if not sub_files:
+            return ""
+
+        # Parse json3 subtitle format
+        sub_file = sub_files[0]
+        if sub_file.endswith('.json3'):
+            with open(sub_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            lines = []
+            for event in data.get('events', []):
+                segs = event.get('segs', [])
+                text = ''.join(s.get('utf8', '') for s in segs).strip()
+                if text and text != '\n':
+                    lines.append(text)
+            return ' '.join(lines)
+        else:
+            # Parse VTT
+            with open(sub_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+            import re as _re
+            # Remove VTT headers and timestamps
+            lines = []
+            for line in content.split('\n'):
+                line = line.strip()
+                if not line or line.startswith('WEBVTT') or '-->' in line or _re.match(r'^\d+$', line):
+                    continue
+                # Remove HTML tags
+                line = _re.sub(r'<[^>]+>', '', line)
+                if line:
+                    lines.append(line)
+            return ' '.join(lines)
+
+
+def _fetch_via_transcript_api(video_id: str) -> str:
+    """Method 2: Use youtube-transcript-api — may be blocked by YouTube."""
     try:
         ytt = YouTubeTranscriptApi()
         result = ytt.fetch(video_id)
@@ -300,8 +361,102 @@ def fetch_transcript(video_id: str) -> str:
         if not lines:
             return ""
         return " ".join(lines)
+    except Exception:
+        return ""
+
+
+def _fetch_via_whisper(video_id: str) -> str:
+    """Method 3: Download audio with yt-dlp and transcribe locally with Whisper."""
+    import yt_dlp
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        audio_path = os.path.join(tmpdir, "audio.mp3")
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': os.path.join(tmpdir, 'audio.%(ext)s'),
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '128',
+            }],
+            'quiet': True,
+            'no_warnings': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        # Find the downloaded audio file
+        import glob
+        audio_files = glob.glob(os.path.join(tmpdir, "audio.*"))
+        if not audio_files:
+            return ""
+
+        audio_file = audio_files[0]
+
+        # Transcribe with faster-whisper
+        try:
+            from faster_whisper import WhisperModel
+            model = WhisperModel("base", device="cpu", compute_type="int8")
+            segments, _ = model.transcribe(audio_file, beam_size=1)
+            return " ".join(seg.text.strip() for seg in segments)
+        except ImportError:
+            pass
+
+        # Fallback to openai-whisper
+        try:
+            import whisper
+            model = whisper.load_model("base")
+            result = model.transcribe(audio_file, fp16=False)
+            return result.get("text", "")
+        except ImportError:
+            pass
+
+        return ""
+
+
+def fetch_transcript(video_id: str) -> str:
+    """Fetch transcript using multiple methods with automatic fallback.
+
+    Order: yt-dlp subtitles → youtube-transcript-api → Whisper local transcription.
+    """
+    errors = []
+
+    # Method 1: yt-dlp subtitles (most reliable, no API blocks)
+    try:
+        st.write("📡 Trying subtitle extraction (Method 1)...")
+        text = _fetch_via_ytdlp(video_id)
+        if text and len(text.strip()) > 20:
+            st.write("✅ Got transcript via subtitle extraction!")
+            return text
     except Exception as e:
-        raise RuntimeError(f"Could not fetch transcript: {e}")
+        errors.append(f"yt-dlp subtitles: {e}")
+
+    # Method 2: youtube-transcript-api (may be blocked)
+    try:
+        st.write("📡 Trying transcript API (Method 2)...")
+        text = _fetch_via_transcript_api(video_id)
+        if text and len(text.strip()) > 20:
+            st.write("✅ Got transcript via API!")
+            return text
+    except Exception as e:
+        errors.append(f"transcript API: {e}")
+
+    # Method 3: Download audio + Whisper (slowest but always works)
+    try:
+        st.write("🎙️ Downloading audio for local transcription (Method 3 — this may take a minute)...")
+        text = _fetch_via_whisper(video_id)
+        if text and len(text.strip()) > 20:
+            st.write("✅ Got transcript via local AI transcription!")
+            return text
+    except Exception as e:
+        errors.append(f"Whisper: {e}")
+
+    raise RuntimeError(
+        "Could not fetch transcript using any method. "
+        f"Details: {'; '.join(errors) if errors else 'No subtitles/captions available.'}"
+    )
 
 
 # ---------------------------------------------------------------------------
