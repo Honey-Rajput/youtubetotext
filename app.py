@@ -835,39 +835,46 @@ def main():
                 st.warning(f"⚠️ Could not process cookies: {e}")
 
         # Fetch info + transcript
-        with st.status("🔄 Processing video...", expanded=True) as status:
-            st.write("📡 Fetching video information...")
-            info = get_video_info(video_id)
-            st.session_state.video_info = info
+        try:
+            with st.status("🔄 Processing video...", expanded=True) as status:
+                st.write("📡 Fetching video information...")
+                info = get_video_info(video_id)
+                st.session_state.video_info = info
 
-            st.write("📝 Extracting transcript...")
-            try:
-                transcript = fetch_transcript(video_id, cookies_path)
-                if not transcript.strip():
-                    st.error("😕 No transcript/captions found for this video. Only videos with captions can be summarized.")
+                st.write("📝 Extracting transcript...")
+                try:
+                    transcript = fetch_transcript(video_id, cookies_path)
+                    if not transcript.strip():
+                        st.error("😕 No transcript/captions found for this video. Only videos with captions can be summarized.")
+                        st.stop()
+                    st.session_state.transcript = transcript
+                except RuntimeError as e:
+                    st.error(f"❌ {e}")
                     st.stop()
-                st.session_state.transcript = transcript
-            except RuntimeError as e:
-                st.error(f"❌ {e}")
-                st.stop()
 
-            st.write(f"🤖 Generating **{summary_length}** summary with AI...")
-            prompt = SUMMARY_PROMPTS[summary_length].format(
-                transcript=transcript[:12000]  # limit to avoid token overflow
-            )
-            try:
-                summary = call_euri_api(
-                    [{"role": "user", "content": prompt}],
-                    api_key,
-                    api_url,
+                st.write(f"🤖 Generating **{summary_length}** summary with AI...")
+                prompt = SUMMARY_PROMPTS[summary_length].format(
+                    transcript=transcript[:12000]  # limit to avoid token overflow
                 )
-                st.session_state.summary = summary
-                st.session_state.chat_history = []  # reset chat for new video
-            except RuntimeError as e:
-                st.error(f"❌ AI summarization failed: {e}")
-                st.stop()
+                try:
+                    summary = call_euri_api(
+                        [{"role": "user", "content": prompt}],
+                        api_key,
+                        api_url,
+                    )
+                    st.session_state.summary = summary
+                    st.session_state.chat_history = []  # reset chat for new video
+                except RuntimeError as e:
+                    st.error(f"❌ AI summarization failed: {e}")
+                    st.stop()
 
-            status.update(label="✅ Summary ready!", state="complete", expanded=False)
+                status.update(label="✅ Summary ready!", state="complete", expanded=False)
+        finally:
+            if cookies_path and os.path.exists(cookies_path):
+                try:
+                    os.remove(cookies_path)
+                except Exception:
+                    pass
 
     # ---- Process Uploaded File ----
     if summarize_file_clicked and uploaded_file:
